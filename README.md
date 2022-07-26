@@ -2,7 +2,7 @@
 
 Using the streamlit library to provide an interface for querying UK Police stop and search data
 
-A write up on my blog is available [here]
+A write up on my blog is available [here](https://virtual-simon.co.uk/police-api-stop-and-search-lookup-with-streamlit/)
 
 Application uses Python, with Streamlit, Pandas, Requests, Datetime, Altair and pydeck and the [UK Police Data API](https://data.police.uk/docs/)
 
