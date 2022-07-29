@@ -1,0 +1,8 @@
+streamlit
+numpy
+requests
+pandas
+requests
+datetime
+altair
+pydeck
