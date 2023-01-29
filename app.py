@@ -121,6 +121,7 @@ def police_api():
 # Error handling for the API call, error appears if nothing returned by JSON stream
         except:
             st.error("Error, please check the API query string - no data returned for the selected Police Force and date")
+            st.info("Information is coming directly from the Police Data API, and will be as up to date as this source")
 
     st.info("Change the selection below to set different parameters for the API query.")
 # To pass a force into the stop and search API we need to capture the force IDs from the police API.  
@@ -224,6 +225,7 @@ def police_api():
 # Error handling for the API call, error appears if nothing returned by JSON stream
     except:
         st.error("Error, please check the API query string - no data returned for the selected Police Force and date")
+        st.info("Information is coming directly from the Police Data API, and will be as up to date as this source")
         
 if st.button("Click to explore the Police Stop and Search Data API"):
    police_api()
