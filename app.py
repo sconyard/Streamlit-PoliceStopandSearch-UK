@@ -13,7 +13,7 @@ st.sidebar.title("Police Data API Explorer")
 
 st.sidebar.info("Streamlit app that allows the exploration the UK Policing Stop and Search data")
 
-st.sidebar.markdown("The app works by running API requests to [Police Data API](https://data.police.uk/docs/)")
+st.sidebar.markdown("The app works by running API requests to [Police Data API](https://data.police.uk/docs/), filtering for police force and month/year")
 
 def police_api():
     
