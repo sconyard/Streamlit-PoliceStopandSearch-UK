@@ -9,9 +9,9 @@ import numpy as np
 
 st.set_page_config(layout="wide", page_title="Police Data API Explorer")
 
-st.title("Police Data API Explorer")
+st.sidebar.title("Police Data API Explorer")
 
-st.info("This is a Streamlit app that allows you to explore the Police Data API. Click the button in the side bar to start with Stop and Search data")
+st.sidebar.info("This is a Streamlit app that allows you to explore the Police Data API.")
 
 def police_api():
     
@@ -218,6 +218,7 @@ def police_api():
 # Error handling for the API call, error appears if nothing returned by JSON stream
     except:
         st.error("Error, please check the API query string - no data returned for the selected Police Force and date")
-
-if st.button("Click to explore the Police Stop and Search Data API"):
-    police_api()
+        
+with st.sidebar:
+    if st.button("Click to explore the Police Stop and Search Data API"):
+        police_api()
