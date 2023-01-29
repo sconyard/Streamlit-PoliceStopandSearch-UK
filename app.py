@@ -13,7 +13,7 @@ st.sidebar.title("Police Data API Explorer")
 
 st.sidebar.info("Streamlit app that allows the exploration the UK Policing Stop and Search data")
 
-st.sidebar.markdown("The app works by running API requests to [Police Data API](https://data.police.uk/docs/)."
+st.sidebar.markdown("The app works by running API requests to [Police Data API](https://data.police.uk/docs/).")
 st.sidebar.markdown("With filters for police force and month/year")
 st.sidebar.markdown("Information from the query is plot on to a map, presented in a table and a graph")
 st.sidebar.markdown("The graph tracks the object of search against the age range")
