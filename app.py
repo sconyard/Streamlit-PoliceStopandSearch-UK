@@ -7,6 +7,12 @@ import altair as alt
 import pydeck as pdk
 import numpy as np
 
+st.set_page_config(layout="wide", page_title="Police Data API Explorer")
+
+st.title("Police Data API Explorer")
+
+st.info("This is a Streamlit app that allows you to explore the Police Data API. Click the button in the side bar to start with Stop and Search data")
+
 def police_api():
     
     def police_query():
@@ -212,12 +218,6 @@ def police_api():
 # Error handling for the API call, error appears if nothing returned by JSON stream
     except:
         st.error("Error, please check the API query string - no data returned for the selected Police Force and date")
-
-st.set_page_config(layout="wide", page_title="Police Data API Explorer")
-
-st.title("Police Data API Explorer")
-
-st.info("This is a Streamlit app that allows you to explore the Police Data API. Click the button in the side bar to start with Stop and Search data")
 
 if st.button("Click to explore the Police Stop and Search Data API"):
     police_api()
