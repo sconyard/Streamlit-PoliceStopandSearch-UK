@@ -219,5 +219,5 @@ def police_api():
     except:
         st.error("Error, please check the API query string - no data returned for the selected Police Force and date")
         
-    if st.button("Click to explore the Police Stop and Search Data API"):
-        police_api()
+if st.button("Click to explore the Police Stop and Search Data API"):
+   police_api()
