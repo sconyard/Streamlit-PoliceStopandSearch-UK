@@ -34,7 +34,7 @@ def police_api():
 
 # We can do something similar with the date, but we need to transform the datetime returned value to YYYY-MM format, later rather than calling the key we're going to call the variable that the key updates, because then we can get it in the correct format
 # on value change updates the state recalls the function
-        date = st.date_input("Select a date", datetime.date(2020, 1, 1),  key="qdate", on_change=police_query)
+        date = st.date_input("Select a date", datetime.date(2023, 1, 1),  key="qdate", on_change=police_query)
         date = date.strftime("%Y-%m")
         st.write(date)
 
@@ -142,7 +142,7 @@ def police_api():
     st.write(date)
 
 # first API call, implementation without any variables, for the first select and date data inputs
-    url = "https://data.police.uk/api/stops-force?force=avon-and-somerset&date=2020-01"
+    url = "https://data.police.uk/api/stops-force?force=avon-and-somerset&date=2023-01"
 
 # error check write the API query string to the page
     st.markdown(f'<h1 style="color:#6ac94f;font-size:12px;">The Police API Query String URL = {url}</h1>', unsafe_allow_html=True)
