@@ -137,7 +137,7 @@ def police_api():
 
 # We can do something similar with the date, but we need to transform the datetime returned value to YYYY-MM format, later rather than calling the key we're going to call the variable that the key updates, because then we can get it in the correct format
 # on value change updates the state calls the function above
-    date = st.date_input("Select a date", datetime.date(2020, 1, 1),  key="qdate", on_change=police_query)
+    date = st.date_input("Select a date", datetime.date(2023, 1, 1),  key="qdate", on_change=police_query)
     date = date.strftime("%Y-%m") 
     st.write(date)
 
