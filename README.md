@@ -1,50 +1,83 @@
 # Streamlit-PoliceStopandSearch-UK
 
-Using the streamlit library to provide an interface for querying UK Police stop and search data
+A [Streamlit](https://streamlit.io/) app for exploring UK police stop and search records, using the
+[Police Data API](https://data.police.uk/docs/).
 
-A write up on my blog is available [here](https://virtual-simon.co.uk/police-api-stop-and-search-lookup-with-streamlit/)
+**Live app:** https://policestopandsearch-uk.streamlit.app/
 
-Application uses Python, with Streamlit, Pandas, Requests, Datetime, Altair and pydeck and the [UK Police Data API](https://data.police.uk/docs/)
+Created by [Simon Conyard](https://www.linkedin.com/in/simonconyard/).
 
-## How does it work
+![Map view](images/2026/map.png)
 
-Using [Streamlit](https://streamlit.io/) makes it easier to build something usable in a few minutes.
+## What it does
 
-Streamlit provides the layout, text inputs, buttons and wraps around the core functions of the lookup.
+Pick a **month** and a **police force** in the sidebar. The app loads every stop and search record that force
+published for that month and shows:
 
-![First Launch](https://github.com/sconyard/Streamlit-PoliceStopandSearch-UK/blob/f13f3949658da1d4b55115bc441a3e2fcd1d3bc3/images/Firstrun.png)
+- **Headline figures:** total searches (with the change on the previous month), arrest rate, no further action
+  rate, linked-outcome rate, and how many records include a location.
+- **Map:** 3D hexagon density or individual points, centred on the force area. Hover for details.
+- **Who was searched:** age range, gender and ethnicity (officer-defined or self-defined), plus what people were
+  searched for by age range.
+- **Reasons & outcomes:** object of search, outcome, outcome by object of search, legislation and search type.
+- **When:** a day-of-week × hour-of-day heatmap and searches per day.
+- **Trend:** up to 36 months for the force: searches per month, arrest and linked-outcome rates, and searches by
+  object of search.
+- **Data:** the full table, downloadable as CSV, with a link to the underlying API query.
 
-The API lookup is initiated by clicking the button, and a static call is presented to make sure some data is populated into the site on first run, it could target any time and force, but it is querying Avon & Somerset in January 2020.
+Filters for search type and object of search apply to every view. The month, force and open tab are kept in the
+URL, so you can share a link to a specific view.
 
-![Selection](https://github.com/sconyard/Streamlit-PoliceStopandSearch-UK/blob/86fa2d9f7208f63fe455c0e71c6bd08181049ad3/images/Selection.png)
+![Who was searched](images/2026/who.png)
 
-On first run the tool is actually passing two API lookups, one to complete the data request for Avon and Somerset, the other to pull back a list of available forces to query via the [Forces](https://data.police.uk/docs/method/forces/) API call.  Unique values returned from this query are being used to populate the dropdown box displayed in the UI. 
+![Trend](images/2026/trend.png)
 
-The date input is using [streamlit.date_input](https://docs.streamlit.io/library/api-reference/widgets/st.date_input), this returns a value in yyyy-mm-dd format, the API is expecting yyyy-mm so the returned value is passed through strftime, to generate the correct formate for the API query (date = date.strftime("%Y-%m"))
+## How it works
 
-Both values are stored in a streamlit session state, which is used for any subsequent query lookups, allowing the force and date the API returns data for to be changed very simply via the UI.
+- `forces` gives the list of forces and their names.
+- `crimes-street-dates` lists which months are available, and which forces published stop and search data for
+  each month. Only valid combinations are offered, so you don't hit "no data" errors.
+- `stops-force?force=<id>&date=<YYYY-MM>` returns the records, which are flattened into a pandas DataFrame.
 
-![Map](https://github.com/sconyard/Streamlit-PoliceStopandSearch-UK/blob/86fa2d9f7208f63fe455c0e71c6bd08181049ad3/images/Map.png)
+API responses are cached for 24 hours, so moving between views and filters doesn't re-query the API. Most forces
+load in a second or two, but the API can take 30 seconds or more to prepare a month for the largest forces (the Met
+especially). The app shows a note and a timer while it waits, loads the Trend tab's months in parallel with a
+progress bar and time estimate, and fills in the month-on-month comparison after the rest of the page has loaded. Charts
+use Altair, and the map uses pydeck with Streamlit's theme-aware base map. Light and dark themes are both
+supported.
 
-The API query returns records of stops along with locations in the format of lattitude and longditude coordinates, information that can be plotted on a map. Streamlit includes integrations to [pydeck_chart](https://docs.streamlit.io/library/api-reference/charts/st.pydeck_chart) which is used to plot the stop and search information to the map.
+### Notes on the data
 
-Rather than referencing the existing dataframe created from the API query, the script builds a smaller table containing only the lan/lon pairs.  Building the new table makes it easier to perform some error checking, to only pull in numeric values and to drop any na values that pydeck_chart will not easily process.
+- The API holds roughly the last three years. Recent months may not include every force yet, because uploads lag.
+- Locations are approximate: the API snaps each location to an anonymised nearby point. Some records have no
+  location at all.
+- *Linked outcome* is the share of searches where the outcome was linked to the object of search. Some forces don't
+  record this field reliably (for example, everything is recorded as "not linked", even arrests). For those forces the
+  app shows **n/a** rather than a misleading figure.
+- The ethnicity and age charts are counts only. Comparing groups fairly needs local population figures, which aren't
+  part of this data.
 
-The initial map view is centred on the south of the UK, not where the data is presented, so some geography knowledge is required to navigate the generated map to the force location.
+![When (dark theme)](images/2026/when-dark.png)
 
-![Table](https://github.com/sconyard/Streamlit-PoliceStopandSearch-UK/blob/86fa2d9f7208f63fe455c0e71c6bd08181049ad3/images/Table.png)
+## Running locally
 
-A table containing the data returned from the API query is then presented back, including an option to download the table in a CSV format.
+```bash
+python -m venv .venv
+.venv/Scripts/activate        # Windows; use `source .venv/bin/activate` on macOS/Linux
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-![Graph](https://github.com/sconyard/Streamlit-PoliceStopandSearch-UK/blob/86fa2d9f7208f63fe455c0e71c6bd08181049ad3/images/Graph.png)
+Requires Python 3.11 or later.
 
-The data can be presented and graphed in many interesting ways, within this MVP a graph is presented to highlight the age of the person being stopped against the object of search
+## Deployment
 
-![Error](https://github.com/sconyard/Streamlit-PoliceStopandSearch-UK/blob/86fa2d9f7208f63fe455c0e71c6bd08181049ad3/images/Error.png)
+The app is hosted on [Streamlit Community Cloud](https://streamlit.io/cloud), which deploys straight from this
+repository's `main` branch: pushing to `main` updates the live app. Community Cloud builds the environment from
+`requirements.txt` (no Docker needed). The Python version is set in the app's *Advanced settings* on Community Cloud.
 
-Error handling is provided for circumstances where no data is returned by the query.  Ordinarily errors are thrown only if the API call returns no data.  No data present either means the date is out of range, or the force in scope has not uploaded data to be queried for the selected timeframe.
+## Support
 
-### Support
+No support offered or liability accepted. Use is entirely at your own risk.
 
-No support offered or liability accepted use is entirely at your own risk.
-
+Contains public sector information licensed under the Open Government Licence v3.0.

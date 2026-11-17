@@ -1,231 +1,697 @@
-import streamlit as st
-import pandas as pd
-from pandas import json_normalize
-import requests
-import datetime
+"""Police Stop and Search Explorer.
+
+A Streamlit app for exploring UK police stop and search records published
+through the data.police.uk API (https://data.police.uk/docs/).
+"""
+
+from __future__ import annotations
+
+import math
+import threading
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from datetime import datetime
+
 import altair as alt
+import pandas as pd
 import pydeck as pdk
-import numpy as np
+import requests
+import streamlit as st
 
-st.set_page_config(layout="wide", page_title="Police Data API Explorer")
+API = "https://data.police.uk/api"
+HEADERS = {"User-Agent": "police-stop-and-search-explorer (streamlit app)"}
+STOPS_TTL_SECONDS = 24 * 60 * 60
+STOPS_MAX_ENTRIES = 300
+TREND_WORKERS = 4  # parallel API requests on the Trend tab (the API allows ~15 requests/second)
+NOT_RECORDED = "Not recorded"
 
-st.sidebar.title("Police Data API Explorer")
+st.set_page_config(page_title="Stop and Search Explorer", page_icon=":material/local_police:", layout="wide")
 
-st.sidebar.info("Streamlit app that allows the exploration the UK Policing Stop and Search data")
 
-st.sidebar.markdown("The app works by running API requests to [Police Data API](https://data.police.uk/docs/).")
-st.sidebar.markdown("With filters for police force and month/year")
-st.sidebar.markdown("Information from the query is plot on to a map and is also presented in a table and a graph")
-st.sidebar.markdown("The graph tracks the object of search against the logged age range")
-st.sidebar.markdown("Information returned from the query can be downloaded as a CSV for later reference")
+# --------------------------------------------------------------------------------------
+# Colours: a colour-blind-checked categorical palette, with separate steps for dark mode
+# --------------------------------------------------------------------------------------
+IS_DARK = (st.context.theme.type or "light") == "dark"
+PALETTE = (
+    ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#0ca30c", "#9085e9"]
+    if IS_DARK
+    else ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"]
+)
+SERIES_1 = PALETTE[0]
+OTHER_GREY = "#898781"
+HEAT_RANGE = ["#1c5cab", "#86b6ef"] if IS_DARK else ["#cde2fb", "#184f95"]
 
-def police_api():
-    
-    def police_query():
-   
-        st.info("Change the selection below to set different parameters for the API query.")
+# Fixed category orders so a category keeps the same colour whatever force/month is shown.
+AGE_ORDER = ["under 10", "10-17", "18-24", "25-34", "over 34", NOT_RECORDED]
+OBJECT_ORDER = [
+    "Controlled drugs",
+    "Offensive weapons",
+    "Stolen goods",
+    "Article for use in theft",
+    "Articles for use in criminal damage",
+    "Anything to threaten or harm anyone",
+    "Firearms",
+]
+OUTCOME_ORDER = [
+    "A no further action disposal",
+    "Arrest",
+    "Community resolution",
+    "Khat or Cannabis warning",
+    "Summons / charged by post",
+    "Penalty Notice for Disorder",
+    "Caution (simple or conditional)",
+]
+DAY_ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-# By building a df object from the returned json values we can use these in a selectbox, capturing the st.session_state key allows us to pass the value back to the API query string
-# On value change updates the state and recalls the function
-        st.selectbox(
-        'Select the Police Force',
-        (force_json_df["id"].unique()), key="force", on_change=police_query)
-        st.session_state.force
 
-# We can do something similar with the date, but we need to transform the datetime returned value to YYYY-MM format, later rather than calling the key we're going to call the variable that the key updates, because then we can get it in the correct format
-# on value change updates the state recalls the function
-        date = st.date_input("Select a date", datetime.date(2023, 1, 1),  key="qdate", on_change=police_query)
-        date = date.strftime("%Y-%m")
-        st.write(date)
+# --------------------------------------------------------------------------------------
+# Data access (cached so the API is only hit when something new is requested)
+# --------------------------------------------------------------------------------------
+def _get_json(path: str, **params):
+    """GET an API endpoint, retrying briefly on rate limiting or temporary server errors."""
+    for attempt in range(4):
+        try:
+            res = requests.get(f"{API}/{path}", params=params, headers=HEADERS, timeout=180)
+            if res.status_code == 404:
+                return []
+            if res.status_code in (429, 500, 502, 503, 504) and attempt < 3:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            res.raise_for_status()
+            return res.json()
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == 3:
+                raise
+            time.sleep(1.5 * (attempt + 1))
 
-# This is better, passing the force and date time values into the API query string for stop and search
-        url = (f'https://data.police.uk/api/stops-force?force={st.session_state.force}&date={date}')
-        
-# error check write the API query string to the page
-        st.markdown(f'<h1 style="color:#6ac94f;font-size:12px;">The Police API Query String URL = {url}</h1>', unsafe_allow_html=True)
-        
-# execute the API call and build the Stop and search df added simple error handling to catch the error if the API call fails   
-        try: 
-            res = requests.get(url)
-            j = res.json()
-            police = json_normalize(j)
 
-# rebuild a smaller dataframe with just the plotable columns to pass to st.pydeck_chart
-# some error checking to only pull in numeric values and to drop na values in lat column, 
-            police["lat"] = police["location.latitude"]
-            police['lat'] = pd.to_numeric(police['lat'])
-            police["lon"] = police["location.longitude"]
-            police['lon'] = pd.to_numeric(police['lon'])
-            df = pd.DataFrame(police, columns=['lat', 'lon'])
-            df.dropna(subset=['lat'], inplace=True)
+@st.cache_data(ttl="12h", show_spinner=False)
+def get_forces() -> dict[str, str]:
+    """Force id -> friendly name."""
+    return {f["id"]: f["name"] for f in _get_json("forces")}
 
-# build the st.pydeck_chart configuration and display the map
-            st.markdown(f'<h1 style="font-size:18px;">Stop and Search Data Map for {st.session_state.force, date}</h1>', unsafe_allow_html=True)
-            st.pydeck_chart(pdk.Deck(
-            map_style='mapbox://styles/mapbox/light-v9',
-            initial_view_state=pdk.ViewState(
-                latitude=51.50,
-                longitude=-0.1276,
-                zoom=7,
-                pitch=40,
-            ),
-            layers=[
-                pdk.Layer(
-                    'HexagonLayer',
-                    data=df,
-                    get_position='[lon, lat]',
-                    radius=200,
-                    elevation_scale=4,
-                    elevation_range=[0, 1000],
-                    pickable=True,
-                    extruded=True,
-                ),
-                pdk.Layer(
-                    'ScatterplotLayer',
-                    data=df,
-                    get_position='[lon, lat]',
-                    get_color='[200, 30, 0, 160]',
-                    get_radius=200,
-                ),
+
+@st.cache_data(ttl="12h", show_spinner=False)
+def get_availability() -> dict[str, list[str]]:
+    """Month (YYYY-MM) -> force ids that have published stop and search data, newest first."""
+    rows = _get_json("crimes-street-dates")
+    avail = {r["date"]: sorted(r.get("stop-and-search") or []) for r in rows}
+    return {m: f for m, f in sorted(avail.items(), reverse=True) if f}
+
+
+@st.cache_resource
+def _stops_cache() -> dict:
+    """Shared cache of fetched months: {(force, month): (fetched_at, seconds_taken, DataFrame)}.
+
+    Hand-rolled rather than st.cache_data so the app can tell in advance whether a request will be slow,
+    show progress while it runs, and fetch several months in parallel threads.
+    """
+    return {"lock": threading.Lock(), "items": {}}
+
+
+def is_cached(force: str, month: str) -> bool:
+    entry = _stops_cache()["items"].get((force, month))
+    return entry is not None and time.time() - entry[0] < STOPS_TTL_SECONDS
+
+
+def get_stops(force: str, month: str) -> pd.DataFrame:
+    """All stop and search records for a force and month, tidied into a flat table. Treat as read-only."""
+    cache = _stops_cache()
+    entry = cache["items"].get((force, month))
+    if entry is not None and time.time() - entry[0] < STOPS_TTL_SECONDS:
+        return entry[2]
+    started = time.time()
+    df = tidy(_get_json("stops-force", force=force, date=month))
+    with cache["lock"]:
+        items = cache["items"]
+        items[(force, month)] = (time.time(), time.time() - started, df)
+        while len(items) > STOPS_MAX_ENTRIES:
+            items.pop(min(items, key=lambda k: items[k][0]))
+    return df
+
+
+def typical_seconds(force: str) -> float | None:
+    """How long recent requests for this force took, used to estimate waiting times."""
+    took = [v[1] for k, v in list(_stops_cache()["items"].items()) if k[0] == force]
+    return sum(took) / len(took) if took else None
+
+
+def format_wait(seconds: float) -> str:
+    if seconds >= 90:
+        return f"about {max(1, round(seconds / 60))} min"
+    return f"about {max(5, round(seconds / 5) * 5)} seconds"
+
+
+def tidy(records: list[dict]) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame()
+    df = pd.json_normalize(records)
+    out = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(df.get("datetime"), utc=True, errors="coerce").dt.tz_convert("Europe/London"),
+            "type": df.get("type"),
+            "object_of_search": df.get("object_of_search"),
+            "outcome": df.get("outcome"),
+            "outcome_linked_to_object_of_search": df.get("outcome_linked_to_object_of_search"),
+            "legislation": df.get("legislation"),
+            "age_range": df.get("age_range"),
+            "gender": df.get("gender"),
+            "officer_defined_ethnicity": df.get("officer_defined_ethnicity"),
+            "self_defined_ethnicity": df.get("self_defined_ethnicity"),
+            "removal_of_more_than_outer_clothing": df.get("removal_of_more_than_outer_clothing"),
+            "operation_name": df.get("operation_name"),
+            "street": df.get("location.street.name"),
+            "lat": pd.to_numeric(df.get("location.latitude"), errors="coerce"),
+            "lon": pd.to_numeric(df.get("location.longitude"), errors="coerce"),
+        }
+    )
+    text_cols = [
+        "type", "object_of_search", "outcome", "legislation", "age_range",
+        "gender", "officer_defined_ethnicity", "self_defined_ethnicity",
+    ]
+    for col in text_cols:
+        out[col] = out[col].astype("string").str.strip().replace("", pd.NA).fillna(NOT_RECORDED)
+    return out.sort_values("datetime", ignore_index=True)
+
+
+def month_label(month: str) -> str:
+    return datetime.strptime(month, "%Y-%m").strftime("%B %Y")
+
+
+# --------------------------------------------------------------------------------------
+# Chart helpers (Altair)
+# --------------------------------------------------------------------------------------
+def fold_categories(series: pd.Series, keep: list[str]) -> pd.Series:
+    """Keep the listed categories and group everything else as 'Other'."""
+    return series.where(series.isin(keep), "Other")
+
+
+def ranked_bars(df: pd.DataFrame, field: str, title: str, order: list[str] | None = None, height: int | None = None):
+    """Horizontal bar chart of counts per category, biggest first (or in a given order)."""
+    counts = df[field].value_counts().rename_axis(field).reset_index(name="searches")
+    counts["share"] = counts["searches"] / counts["searches"].sum()
+    sort = order if order else "-x"
+    return (
+        alt.Chart(counts, title=title)
+        .mark_bar(color=SERIES_1, cornerRadiusEnd=4)
+        .encode(
+            x=alt.X("searches:Q", title="Searches"),
+            y=alt.Y(f"{field}:N", sort=sort, title=None, axis=alt.Axis(labelLimit=260),
+                    scale=alt.Scale(paddingInner=0.3)),
+            tooltip=[
+                alt.Tooltip(f"{field}:N", title="Category"),
+                alt.Tooltip("searches:Q", title="Searches", format=","),
+                alt.Tooltip("share:Q", title="Share", format=".1%"),
             ],
-            ))
+        )
+        .properties(height=height or max(140, 30 * len(counts)))
+    )
 
-# show the full df from the API call
-            st.markdown(f'<h1 style="font-size:18px;">Stop and Search Data Table for {st.session_state.force, date}</h1>', unsafe_allow_html=True)
-            st.dataframe(police)
 
-# download function for df
-            def convert_df(police):
-                return police.to_csv().encode('utf-8')
+def stacked_share(df: pd.DataFrame, y_field: str, color_field: str, colour_keep: list[str], title: str,
+                  y_order: list[str] | None = None, normalise: bool = True):
+    """Horizontal stacked bars: each row is a y category, split by colour category."""
+    data = df[[y_field, color_field]].copy()
+    data[color_field] = fold_categories(data[color_field], colour_keep)
+    counts = data.value_counts().reset_index(name="searches")
+    counts["share"] = counts["searches"] / counts.groupby(y_field)["searches"].transform("sum")
+    domain = [c for c in colour_keep if c in set(counts[color_field])]
+    colours = [PALETTE[colour_keep.index(c)] for c in domain]
+    if "Other" in set(counts[color_field]):
+        domain.append("Other")
+        colours.append(OTHER_GREY)
+    counts["order"] = counts[color_field].map({c: i for i, c in enumerate(domain)})
+    rows = y_order if y_order else counts.groupby(y_field)["searches"].sum().sort_values(ascending=False).index.tolist()
+    return (
+        alt.Chart(counts, title=title)
+        .mark_bar(stroke=None)
+        .encode(
+            x=alt.X("searches:Q", stack="normalize" if normalise else "zero",
+                    title="Share of searches" if normalise else "Searches",
+                    axis=alt.Axis(format="%") if normalise else alt.Axis()),
+            y=alt.Y(f"{y_field}:N", sort=[r for r in rows if r in set(counts[y_field])], title=None,
+                    axis=alt.Axis(labelLimit=260), scale=alt.Scale(paddingInner=0.3)),
+            color=alt.Color(f"{color_field}:N", scale=alt.Scale(domain=domain, range=colours),
+                            legend=alt.Legend(title=None, orient="bottom", columns=2, labelLimit=320)),
+            order=alt.Order("order:Q"),
+            tooltip=[
+                alt.Tooltip(f"{y_field}:N", title=y_field.replace("_", " ").capitalize()),
+                alt.Tooltip(f"{color_field}:N", title=color_field.replace("_", " ").capitalize()),
+                alt.Tooltip("searches:Q", title="Searches", format=","),
+                alt.Tooltip("share:Q", title="Share of row", format=".1%"),
+            ],
+        )
+        .properties(height=max(160, 36 * len(rows)))
+    )
 
-            csv = convert_df(police)
 
-            st.download_button(
-                label="Download Output as CSV",
-                data=csv,
-                file_name=(f'StopandSearch_{st.session_state.force}_{date}.csv'),
-                mime='text/csv',
+def rate(mask: pd.Series) -> float | None:
+    return float(mask.mean()) if len(mask) else None
+
+
+def linked_rate(df: pd.DataFrame) -> float | None:
+    """Share of all searches with an outcome linked to the object of search (Home Office style measure).
+
+    The field is normally blank for 'no further action'. Some forces don't fill it in for other outcomes
+    either, or record False for everything (even arrests); the figure would mislead then, so return None.
+    """
+    if df.empty:
+        return None
+    col = df["outcome_linked_to_object_of_search"]
+    acted_on = ~df["outcome"].isin(["A no further action disposal", NOT_RECORDED])
+    if acted_on.sum() == 0 or col[acted_on].notna().mean() < 0.5 or not col.fillna(False).astype(bool).any():
+        return None
+    return float(col.fillna(False).astype(bool).mean())
+
+
+def fmt_pct(x: float | None) -> str:
+    return "–" if x is None or pd.isna(x) else f"{x:.0%}"
+
+
+def chart(c, legend_rows: int = 0):
+    # Streamlit's chart theme squashes charts to a default size unless the element height is given
+    # explicitly, so pass the plot height plus room for the title, axis and any bottom legend.
+    plot_height = c.height if isinstance(c.height, int) else 300
+    st.altair_chart(c, width="stretch", height=plot_height + 90 + 22 * legend_rows)
+
+
+# --------------------------------------------------------------------------------------
+# Sidebar: selections and filters (bound to the URL so a view can be shared as a link)
+# --------------------------------------------------------------------------------------
+try:
+    forces = get_forces()
+    availability = get_availability()
+except requests.RequestException as exc:
+    st.error(f"Couldn't reach the Police Data API right now ({exc}). Please try again in a few minutes.")
+    st.stop()
+
+if not availability:
+    st.error("The Police Data API didn't return any months with stop and search data.")
+    st.stop()
+
+months = list(availability)
+
+with st.sidebar:
+    st.title(":material/local_police: Stop and Search Explorer")
+    st.caption("Explore stop and search records published by police forces in England, Wales and Northern Ireland.")
+
+    month = st.selectbox("Month", months, format_func=month_label, key="month", bind="query-params")
+    month_forces = availability[month]
+    default_force = "avon-and-somerset" if "avon-and-somerset" in month_forces else month_forces[0]
+    force = st.selectbox(
+        "Police force",
+        month_forces,
+        index=month_forces.index(default_force),
+        format_func=lambda f: forces.get(f, f),
+        key="force",
+        bind="query-params",
+        help="Only forces that published stop and search data for the chosen month are listed.",
+    )
+
+try:
+    if is_cached(force, month):
+        stops = get_stops(force, month)
+    else:
+        # The API builds each month's file on request: a second or two for most forces, but 20-30 seconds
+        # or more for the largest (e.g. the Met). Nothing arrives until it's done, so show a note and a timer.
+        note = st.empty()
+        note.info(
+            f"**Fetching {forces.get(force, force)} records for {month_label(month)} from the Police Data API.**  \n"
+            "Most forces load in a few seconds, but the largest (such as the Metropolitan Police) can take 30 "
+            "seconds or more per month while the API prepares the data. Once loaded, it's cached and quick to revisit.",
+            icon=":material/hourglass_top:",
+        )
+        with st.spinner("Waiting for the Police Data API…", show_time=True):
+            stops = get_stops(force, month)
+        note.empty()
+except requests.RequestException as exc:
+    st.error(f"The Police Data API request failed ({exc}). Try again, or pick another force or month.")
+    st.stop()
+
+with st.sidebar:
+    st.subheader("Filters")
+    if stops.empty:
+        type_filter, object_filter = [], []
+    else:
+        type_filter = st.multiselect("Search type", sorted(stops["type"].unique()), placeholder="All search types")
+        object_filter = st.multiselect(
+            "Object of search", sorted(stops["object_of_search"].unique()), placeholder="All objects of search"
+        )
+
+    st.divider()
+    st.markdown(
+        "Data comes directly from the [Police Data API](https://data.police.uk/docs/method/stops-force/) and is as "
+        "current as each force's uploads. The API keeps roughly the last three years.\n\n"
+        "Created by [Simon Conyard](https://www.linkedin.com/in/simonconyard/)"
+    )
+    st.caption("Contains public sector information licensed under the Open Government Licence v3.0.")
+
+
+def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    if type_filter:
+        df = df[df["type"].isin(type_filter)]
+    if object_filter:
+        df = df[df["object_of_search"].isin(object_filter)]
+    return df
+
+
+data = apply_filters(stops)
+force_name = forces.get(force, force)
+
+# --------------------------------------------------------------------------------------
+# Headline numbers
+# --------------------------------------------------------------------------------------
+st.title(force_name)
+st.caption(f"Stop and search · {month_label(month)}" + (" · filtered" if type_filter or object_filter else ""))
+
+if data.empty:
+    st.warning("No stop and search records match this force, month and filter combination.")
+    st.stop()
+
+total = len(data)
+located = data["lat"].notna()
+
+# Previous published month for this force, for a month-on-month comparison. If it isn't cached yet it's
+# fetched at the very end of the run, so a slow force doesn't hold up the rest of the page.
+prev_month = next((m for m in months if m < month and force in availability[m]), None)
+
+
+def searches_metric(prev_total: int | None = None, pending: bool = False):
+    if prev_total is not None:
+        delta = f"{total - prev_total:+,} vs {month_label(prev_month)[:3]}"
+    elif pending:
+        delta = f"loading {month_label(prev_month)[:3]}…"
+    else:
+        delta = None
+    k1_slot.metric("Searches", f"{total:,}", delta=delta, delta_color="off", border=True,
+                   delta_arrow="off" if pending else "auto")
+
+
+k1, k2, k3, k4, k5 = st.columns(5)
+k1_slot = k1.empty()
+if prev_month and is_cached(force, prev_month):
+    searches_metric(len(apply_filters(get_stops(force, prev_month))))
+else:
+    searches_metric(pending=bool(prev_month))
+k2.metric("Arrest rate", fmt_pct(rate(data["outcome"].eq("Arrest"))), border=True,
+          help="Share of searches with an outcome of arrest.")
+k3.metric("No further action", fmt_pct(rate(data["outcome"].eq("A no further action disposal"))), border=True,
+          help="Share of searches where no further action was taken.")
+linked = linked_rate(data)
+k4.metric("Linked outcome", "n/a" if linked is None else fmt_pct(linked), border=True,
+          help="Share of searches where the outcome was linked to what the officer was searching for (e.g. a "
+               "drugs search that found drugs). Shown as n/a when this force doesn't reliably record it.")
+k5.metric("With a location", fmt_pct(rate(located)), border=True,
+          help="Some records are published without a location and can't be placed on the map.")
+
+# --------------------------------------------------------------------------------------
+# Tabs (only the open tab runs, and the open tab is kept in the URL)
+# --------------------------------------------------------------------------------------
+tab_map, tab_people, tab_reasons, tab_time, tab_trend, tab_data = st.tabs(
+    ["Map", "Who was searched", "Reasons & outcomes", "When", "Trend", "Data"],
+    key="view", on_change="rerun", bind="query-params",
+)
+
+with tab_map:
+    if tab_map.open:
+        pts = data.dropna(subset=["lat", "lon"]).copy()
+        if pts.empty:
+            st.info("None of these records include a location, so there's nothing to map.")
+        else:
+            style = st.segmented_control("Map style", ["Hexagons", "Points"], default="Hexagons", required=True,
+                                         label_visibility="collapsed")
+            # Centre and zoom on the bulk of the data (ignoring stray outliers)
+            lat_lo, lat_hi = pts["lat"].quantile([0.05, 0.95])
+            lon_lo, lon_hi = pts["lon"].quantile([0.05, 0.95])
+            span = max(lat_hi - lat_lo, (lon_hi - lon_lo) * 0.6, 0.02)
+            zoom = min(13.0, max(5.0, math.log2(360 / span) - 0.6))
+            pts["when"] = pts["datetime"].dt.strftime("%a %d %b %H:%M")
+            pts = pts.fillna({"street": "Location withheld"})
+            tooltip_cols = ["lat", "lon", "street", "when", "type", "object_of_search", "outcome"]
+            if style == "Hexagons":
+                layer = pdk.Layer(
+                    "HexagonLayer", data=pts[["lat", "lon"]], get_position="[lon, lat]",
+                    radius=max(150, int(400 / 2 ** (zoom - 9))), elevation_scale=6, elevation_range=[0, 1500],
+                    extruded=True, pickable=True, coverage=0.9,
+                )
+                tooltip = {"text": "{elevationValue} searches in this area"}
+                pitch = 40
+            else:
+                layer = pdk.Layer(
+                    "ScatterplotLayer", data=pts[tooltip_cols], get_position="[lon, lat]",
+                    get_fill_color=[214, 64, 52, 170], get_radius=60, radius_min_pixels=3, radius_max_pixels=12,
+                    pickable=True,
+                )
+                tooltip = {"html": "<b>{street}</b><br/>{when}<br/>{type} · {object_of_search}<br/>Outcome: {outcome}"}
+                pitch = 0
+            st.pydeck_chart(
+                pdk.Deck(
+                    map_style=None,  # follow the Streamlit light/dark theme
+                    initial_view_state=pdk.ViewState(
+                        latitude=float(pts["lat"].median()), longitude=float(pts["lon"].median()),
+                        zoom=zoom, pitch=pitch,
+                    ),
+                    layers=[layer],
+                    tooltip=tooltip,
+                ),
+                height=560,
+            )
+            missing = total - len(pts)
+            st.caption(
+                "Locations are approximate: the API snaps each one to a nearby anonymised point."
+                + (f" {missing:,} record(s) had no location and aren't shown." if missing else "")
+            )
+
+with tab_people:
+    if tab_people.open:
+        c1, c2 = st.columns(2)
+        with c1:
+            chart(ranked_bars(data, "age_range", "Age range", order=AGE_ORDER))
+        with c2:
+            chart(ranked_bars(data, "gender", "Gender"))
+        eth_kind = st.segmented_control(
+            "Ethnicity as", ["Officer-defined", "Self-defined"], default="Officer-defined", required=True,
+            help="Officer-defined ethnicity is the officer's perception; self-defined is what the person stated.",
+        )
+        eth_field = "officer_defined_ethnicity" if eth_kind == "Officer-defined" else "self_defined_ethnicity"
+        chart(ranked_bars(data, eth_field, f"Ethnicity ({eth_kind.lower()})"))
+        st.caption(
+            "Counts only: comparing groups fairly needs local population figures (e.g. the Census), "
+            "which aren't part of this data."
+        )
+        chart(stacked_share(data, "age_range", "object_of_search", OBJECT_ORDER,
+                            "What people were searched for, by age range", y_order=AGE_ORDER), legend_rows=4)
+
+with tab_reasons:
+    if tab_reasons.open:
+        c1, c2 = st.columns(2)
+        with c1:
+            chart(ranked_bars(data, "object_of_search", "Object of search"))
+        with c2:
+            chart(ranked_bars(data, "outcome", "Outcome"))
+        chart(stacked_share(data, "object_of_search", "outcome", OUTCOME_ORDER, "Outcome by object of search"), legend_rows=4)
+        c3, c4 = st.columns(2)
+        with c3:
+            chart(ranked_bars(data, "legislation", "Legislation used"))
+        with c4:
+            chart(ranked_bars(data, "type", "Search type"))
+
+with tab_time:
+    if tab_time.open:
+        timed = data.dropna(subset=["datetime"]).copy()
+        timed["day"] = pd.Categorical(timed["datetime"].dt.strftime("%a"), DAY_ORDER)
+        timed["hour"] = timed["datetime"].dt.hour
+        grid = (
+            timed.groupby(["day", "hour"], observed=False).size().reset_index(name="searches")
+        )
+        heat = (
+            alt.Chart(grid, title="Searches by day of week and hour (UK time)")
+            .mark_rect(cornerRadius=2, stroke=None)
+            .encode(
+                x=alt.X("hour:O", title="Hour of day"),
+                y=alt.Y("day:O", sort=DAY_ORDER, title=None),
+                color=alt.Color("searches:Q", scale=alt.Scale(range=HEAT_RANGE), legend=alt.Legend(title="Searches")),
+                tooltip=[alt.Tooltip("day:O", title="Day"), alt.Tooltip("hour:O", title="Hour"),
+                         alt.Tooltip("searches:Q", title="Searches")],
+            )
+            .properties(height=260)
+        )
+        chart(heat)
+        daily = timed.groupby(timed["datetime"].dt.date).size().rename_axis("date").reset_index(name="searches")
+        daily["date"] = pd.to_datetime(daily["date"])
+        chart(
+            alt.Chart(daily, title="Searches per day")
+            .mark_bar(color=SERIES_1, cornerRadiusEnd=3)
+            .encode(
+                x=alt.X("date:T", title=None, axis=alt.Axis(format="%d %b")),
+                y=alt.Y("searches:Q", title="Searches"),
+                tooltip=[alt.Tooltip("date:T", title="Date", format="%a %d %b %Y"),
+                         alt.Tooltip("searches:Q", title="Searches")],
+            )
+            .properties(height=240)
+        )
+
+with tab_trend:
+    if tab_trend.open:
+        force_months = [m for m in months if m <= month and force in availability[m]]
+        if len(force_months) > 3:
+            n = st.slider("Months to include", 3, len(force_months), min(12, len(force_months)),
+                          help="Counted back from the selected month. Each month is a separate API request the "
+                               "first time it's loaded, so longer ranges take longer for large forces.")
+        else:
+            n = len(force_months)
+            st.caption(f"Only {n} month(s) of data are available up to {month_label(month)}.")
+        wanted = list(reversed(force_months[:n]))
+        to_fetch = [m for m in wanted if not is_cached(force, m)]
+        failed = []
+        if to_fetch:
+            per_month = typical_seconds(force) or 5
+            estimate = math.ceil(len(to_fetch) / TREND_WORKERS) * per_month
+            note = st.empty()
+            if estimate > 20:
+                note.info(
+                    f"Loading {len(to_fetch)} months of {force_name} data. Each month takes "
+                    f"{format_wait(per_month)} for this force, so this should take **{format_wait(estimate)}**. "
+                    "Months load in parallel and are cached afterwards.",
+                    icon=":material/hourglass_top:",
+                )
+            progress = st.progress(0.0, text=f"Loading {len(to_fetch)} months…")
+            started = time.time()
+            with ThreadPoolExecutor(max_workers=TREND_WORKERS) as pool:
+                futures = {pool.submit(get_stops, force, m): m for m in to_fetch}
+                pending = set(futures)
+                while pending:
+                    # Wake at least once a second so the elapsed time keeps ticking during slow requests
+                    finished, pending = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+                    failed += [futures[f] for f in finished if f.exception() is not None]
+                    done = len(to_fetch) - len(pending)
+                    progress.progress(
+                        done / len(to_fetch),
+                        text=f"Loaded {done} of {len(to_fetch)} months · {time.time() - started:.0f}s elapsed",
+                    )
+            progress.empty()
+            note.empty()
+        frames = [apply_filters(get_stops(force, m)).assign(month=m) for m in wanted if m not in failed]
+        if failed:
+            st.warning("Couldn't load: " + ", ".join(month_label(m) for m in failed))
+        trend = pd.concat([f for f in frames if not f.empty], ignore_index=True) if frames else pd.DataFrame()
+        if trend.empty:
+            st.info("No records in this range.")
+        else:
+            trend["month_start"] = pd.to_datetime(trend["month"])
+            month_axis = alt.X("label:O", title=None, sort=None, axis=alt.Axis(labelAngle=0))
+            monthly = pd.DataFrame(
+                [
+                    {"month_start": m, "searches": len(g), "arrest": g["outcome"].eq("Arrest").mean(),
+                     "linked": linked_rate(g)}
+                    for m, g in trend.groupby("month_start")
+                ]
+            )
+            monthly["label"] = monthly["month_start"].dt.strftime("%b %y")
+            chart(
+                alt.Chart(monthly, title="Searches per month")
+                .mark_bar(color=SERIES_1, cornerRadiusEnd=4)
+                .encode(
+                    x=month_axis,
+                    y=alt.Y("searches:Q", title="Searches"),
+                    tooltip=[alt.Tooltip("label:O", title="Month"),
+                             alt.Tooltip("searches:Q", title="Searches", format=",")],
+                )
+                .properties(height=260)
+            )
+            rates = monthly.melt(["month_start", "label"], ["arrest", "linked"], var_name="measure", value_name="rate").dropna()
+            rates["measure"] = rates["measure"].map({"arrest": "Arrest rate", "linked": "Linked outcome"})
+            base = alt.Chart(rates, title="Arrest rate and linked-outcome rate").encode(
+                x=month_axis,
+                y=alt.Y("rate:Q", title=None, axis=alt.Axis(format="%")),
+                color=alt.Color("measure:N", scale=alt.Scale(domain=["Arrest rate", "Linked outcome"],
+                                                             range=PALETTE[:2]),
+                                legend=alt.Legend(title=None, orient="bottom")),
+                tooltip=[alt.Tooltip("label:O", title="Month"),
+                         alt.Tooltip("measure:N", title="Measure"), alt.Tooltip("rate:Q", title="Rate", format=".1%")],
+            )
+            chart((base.mark_line(strokeWidth=2) + base.mark_point(size=60, filled=True)).properties(height=260), legend_rows=1)
+            trend["object_of_search"] = fold_categories(trend["object_of_search"], OBJECT_ORDER)
+            obj = trend.groupby(["month_start", "object_of_search"]).size().reset_index(name="searches")
+            obj["label"] = obj["month_start"].dt.strftime("%b %y")
+            domain = [c for c in OBJECT_ORDER if c in set(obj["object_of_search"])]
+            colours = [PALETTE[OBJECT_ORDER.index(c)] for c in domain]
+            if "Other" in set(obj["object_of_search"]):
+                domain.append("Other")
+                colours.append(OTHER_GREY)
+            obj["order"] = obj["object_of_search"].map({c: i for i, c in enumerate(domain)})
+            chart(
+                alt.Chart(obj, title="Searches per month by object of search")
+                .mark_bar()
+                .encode(
+                    x=month_axis,
+                    y=alt.Y("searches:Q", title="Searches"),
+                    color=alt.Color("object_of_search:N", scale=alt.Scale(domain=domain, range=colours),
+                                    legend=alt.Legend(title=None, orient="bottom", columns=2, labelLimit=320)),
+                    order=alt.Order("order:Q"),
+                    tooltip=[alt.Tooltip("label:O", title="Month"),
+                             alt.Tooltip("object_of_search:N", title="Object of search"),
+                             alt.Tooltip("searches:Q", title="Searches", format=",")],
+                )
+                .properties(height=320),
+                legend_rows=4,
+            )
+            with st.expander("Monthly figures as a table"):
+                st.dataframe(
+                    monthly.assign(month=monthly["month_start"].dt.strftime("%B %Y"))[
+                        ["month", "searches", "arrest", "linked"]],
+                    hide_index=True,
+                    column_config={
+                        "month": "Month",
+                        "searches": st.column_config.NumberColumn("Searches", format="localized"),
+                        "arrest": st.column_config.NumberColumn("Arrest rate", format="percent"),
+                        "linked": st.column_config.NumberColumn("Linked outcome", format="percent"),
+                    },
                 )
 
-# build and show and altair chart
-            st.markdown(f'<h1 style="font-size:18px;">Stop and Search Data Chart, age_range and object_of_search {st.session_state.force, date}</h1>', unsafe_allow_html=True)
-            chart = alt.Chart(police).mark_area().encode(
-            alt.X('age_range:N'),
-            alt.Y('count(kind):Q'),
-            color='object_of_search:N'
-            ).properties(
-                width=500,
-                height=500
-            )
-            st.altair_chart(chart, use_container_width=True)
-# Error handling for the API call, error appears if nothing returned by JSON stream
-        except:
-            st.error("Error, please check the API query string - no data returned for the selected Police Force and date")
-            st.info("Information is coming directly from the Police Data API, and will be as up to date as this source")
-
-    st.info("Change the selection below to set different parameters for the API query.")
-# To pass a force into the stop and search API we need to capture the force IDs from the police API.  
-    force = requests.get("https://data.police.uk/api/forces")
-    force_json = force.json()
-    force_json_df = json_normalize(force_json)
-# By building a df object from the returned json values we can use these in a selectbox, capturing the st.session_state key allows us to pass the value back to the API query string
-# On value change updates the state and calls the function above
-    st.selectbox(
-        'Select the Police Force',
-        (force_json_df["id"].unique()), key="force", on_change=police_query)
-    st.session_state.force
-
-# We can do something similar with the date, but we need to transform the datetime returned value to YYYY-MM format, later rather than calling the key we're going to call the variable that the key updates, because then we can get it in the correct format
-# on value change updates the state calls the function above
-    date = st.date_input("Select a date", datetime.date(2023, 1, 1),  key="qdate", on_change=police_query)
-    date = date.strftime("%Y-%m") 
-    st.write(date)
-
-# first API call, implementation without any variables, for the first select and date data inputs
-    url = "https://data.police.uk/api/stops-force?force=avon-and-somerset&date=2023-01"
-
-# error check write the API query string to the page
-    st.markdown(f'<h1 style="color:#6ac94f;font-size:12px;">The Police API Query String URL = {url}</h1>', unsafe_allow_html=True)
-
-# execute the API call and build the Stop and search df added simple error handling to catch the error if the API call fails 
-    try:
-        res = requests.get(url)
-        j = res.json()
-        police = json_normalize(j)
-
-# rebuild a smaller dataframe with just the plotable columns to pass to st.pydeck_chart
-# some error checking to only pull in numeric values and to drop na values in lat column, 
-        police["lat"] = police["location.latitude"]
-        police['lat'] = pd.to_numeric(police['lat'])
-        police["lon"] = police["location.longitude"]
-        police['lon'] = pd.to_numeric(police['lon'])
-        df = pd.DataFrame(police, columns=['lat', 'lon'])
-        df.dropna(subset=['lat'], inplace=True)
-
-        st.markdown(f'<h1 style="font-size:18px;">Stop and Search Data Map for {st.session_state.force, date}</h1>', unsafe_allow_html=True)
-# build the st.pydeck_chart configuration and display the map
-        st.pydeck_chart(pdk.Deck(
-        map_style='mapbox://styles/mapbox/light-v9',
-        initial_view_state=pdk.ViewState(
-            latitude=51.50,
-            longitude=-0.1276,
-            zoom=7,
-            pitch=40,
-        ),
-        layers=[
-            pdk.Layer(
-                'HexagonLayer',
-                data=df,
-                get_position='[lon, lat]',
-                radius=200,
-                elevation_scale=4,
-                elevation_range=[0, 1000],
-                pickable=True,
-                extruded=True,
-                ),
-            pdk.Layer(
-                'ScatterplotLayer',
-                data=df,
-                get_position='[lon, lat]',
-                get_color='[200, 30, 0, 160]',
-                get_radius=200,
-            ),
-        ],
-        ))
-        
-
-# show the df from the API call
-        st.markdown(f'<h1 style="font-size:18px;">Stop and Search Data Table for {st.session_state.force, date}</h1>', unsafe_allow_html=True)
-        st.dataframe(police)
-
-# download function for the df
-        def convert_df(police):
-            return police.to_csv().encode('utf-8')
-    
-        csv = convert_df(police)
-
-        st.download_button(
-            label="Download Output as CSV",
-            data=csv,
-            file_name=(f'StopandSearch_{st.session_state.force}_{date}.csv'),
-            mime='text/csv',
-            )
-
-# build and show and altair chart
-        st.markdown(f'<h1 style="font-size:18px;">Stop and Search Data Chart, age_range and object_of_search {st.session_state.force, date}</h1>', unsafe_allow_html=True)
-        chart = alt.Chart(police).mark_area().encode(
-        alt.X('age_range:N'),
-        alt.Y('count(kind):Q'),
-        color='object_of_search:N'
-        ).properties(
-            width=500,
-            height=500
+with tab_data:
+    if tab_data.open:
+        st.dataframe(
+            data,
+            hide_index=True,
+            column_config={
+                "datetime": st.column_config.DatetimeColumn("Date/time", format="ddd D MMM YYYY, HH:mm"),
+                "type": "Type",
+                "object_of_search": "Object of search",
+                "outcome": "Outcome",
+                "outcome_linked_to_object_of_search": st.column_config.CheckboxColumn("Outcome linked"),
+                "legislation": "Legislation",
+                "age_range": "Age range",
+                "gender": "Gender",
+                "officer_defined_ethnicity": "Ethnicity (officer)",
+                "self_defined_ethnicity": "Ethnicity (self-defined)",
+                "removal_of_more_than_outer_clothing": st.column_config.CheckboxColumn("More than outer clothing"),
+                "operation_name": "Operation",
+                "street": "Street",
+                "lat": st.column_config.NumberColumn("Latitude", format="%.5f"),
+                "lon": st.column_config.NumberColumn("Longitude", format="%.5f"),
+            },
         )
-        st.altair_chart(chart, use_container_width=True)
-# Error handling for the API call, error appears if nothing returned by JSON stream
-    except:
-        st.error("Error, please check the API query string - no data returned for the selected Police Force and date")
-        st.info("Information is coming directly from the Police Data API, and will be as up to date as this source")
-        
-if st.button("Click to explore the Police Stop and Search Data API"):
-   police_api()
+        export = data.copy()
+        export["datetime"] = export["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S%z")
+        st.download_button(
+            "Download as CSV",
+            export.to_csv(index=False).encode("utf-8"),
+            file_name=f"stop-and-search_{force}_{month}.csv",
+            mime="text/csv",
+            icon=":material/download:",
+        )
+        api_url = f"{API}/stops-force?force={force}&date={month}"
+        st.caption(f"Source query: [{api_url}]({api_url})")
+
+
+# --------------------------------------------------------------------------------------
+# Finally, fill in the month-on-month comparison if it wasn't already cached
+# --------------------------------------------------------------------------------------
+if prev_month and not is_cached(force, prev_month):
+    try:
+        searches_metric(len(apply_filters(get_stops(force, prev_month))))
+    except requests.RequestException:
+        searches_metric()

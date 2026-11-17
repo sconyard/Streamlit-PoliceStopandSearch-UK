@@ -1,8 +1,5 @@
-streamlit
-numpy
-requests
-pandas
-requests
-datetime
-altair
-pydeck
+streamlit>=1.67,<2
+pandas>=2.2
+altair>=5.4
+pydeck>=0.9
+requests>=2.32
