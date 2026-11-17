@@ -88,7 +88,10 @@ def _get_json(path: str, **params):
 @st.cache_data(ttl="12h", show_spinner=False)
 def get_forces() -> dict[str, str]:
     """Force id -> friendly name."""
-    return {f["id"]: f["name"] for f in _get_json("forces")}
+    names = {f["id"]: f["name"] for f in _get_json("forces")}
+    # British Transport Police publishes stop and search data but isn't in the API's forces list
+    names.setdefault("btp", "British Transport Police")
+    return names
 
 
 @st.cache_data(ttl="12h", show_spinner=False)
@@ -296,20 +299,26 @@ with st.sidebar:
     st.caption("Explore stop and search records published by police forces in England, Wales and Northern Ireland.")
 
     month = st.selectbox("Month", months, format_func=month_label, key="month", bind="query-params")
-    month_forces = availability[month]
-    default_force = "avon-and-somerset" if "avon-and-somerset" in month_forces else month_forces[0]
+    all_forces = sorted(set(forces) | {f for fs in availability.values() for f in fs}, key=lambda f: forces.get(f, f))
     force = st.selectbox(
         "Police force",
-        month_forces,
-        index=month_forces.index(default_force),
+        all_forces,
+        index=all_forces.index("avon-and-somerset") if "avon-and-somerset" in all_forces else 0,
         format_func=lambda f: forces.get(f, f),
         key="force",
         bind="query-params",
-        help="Only forces that published stop and search data for the chosen month are listed.",
+        help="Forces upload their stop and search data monthly, and some run a few months behind. If a force "
+             "has no data for the chosen month, the app says so.",
     )
 
+# Has this force published data for this month? If not, skip the API call and explain instead.
+has_data = force in availability[month]
+force_months_all = [m for m in months if force in availability[m]]  # newest first
+
 try:
-    if is_cached(force, month):
+    if not has_data:
+        stops = pd.DataFrame()
+    elif is_cached(force, month):
         stops = get_stops(force, month)
     else:
         # The API builds each month's file on request: a second or two for most forces, but 20-30 seconds
@@ -329,10 +338,10 @@ except requests.RequestException as exc:
     st.stop()
 
 with st.sidebar:
-    st.subheader("Filters")
     if stops.empty:
         type_filter, object_filter = [], []
     else:
+        st.subheader("Filters")
         type_filter = st.multiselect("Search type", sorted(stops["type"].unique()), placeholder="All search types")
         object_filter = st.multiselect(
             "Object of search", sorted(stops["object_of_search"].unique()), placeholder="All objects of search"
@@ -366,12 +375,38 @@ force_name = forces.get(force, force)
 st.title(force_name)
 st.caption(f"Stop and search · {month_label(month)}" + (" · filtered" if type_filter or object_filter else ""))
 
-if data.empty:
-    st.warning("No stop and search records match this force, month and filter combination.")
-    st.stop()
+def go_to_month(m: str):
+    st.session_state["month"] = m
+
+
+if not has_data:
+    if not force_months_all:
+        no_data_msg = (
+            f"{force_name} hasn't published any stop and search data to the Police Data API in the last three "
+            "years, so there's nothing to show."
+        )
+    else:
+        latest = force_months_all[0]
+        no_data_msg = (
+            f"No stop and search data is available yet for {force_name} in {month_label(month)}. Forces upload "
+            "their data monthly, and some run a few months behind or miss months. "
+            f"The latest month with data for {force_name} is {month_label(latest)}."
+            if month > latest
+            else f"{force_name} didn't publish stop and search data for {month_label(month)}. "
+                 "Forces occasionally miss a month, or haven't uploaded it to the Police Data API."
+        )
+    st.info(no_data_msg, icon=":material/event_busy:")
+    if force_months_all:
+        target = force_months_all[0] if month > force_months_all[0] else next(
+            (m for m in force_months_all if m < month), force_months_all[0])
+        st.button(f"Show {month_label(target)}", icon=":material/arrow_forward:", on_click=go_to_month,
+                  args=(target,))
+elif data.empty:
+    no_data_msg = "No stop and search records match the selected filters for this force and month."
+    st.info(no_data_msg, icon=":material/filter_alt_off:")
 
 total = len(data)
-located = data["lat"].notna()
+located = data["lat"].notna() if not data.empty else pd.Series(dtype=bool)
 
 # Previous published month for this force, for a month-on-month comparison. If it isn't cached yet it's
 # fetched at the very end of the run, so a slow force doesn't hold up the rest of the page.
@@ -389,22 +424,25 @@ def searches_metric(prev_total: int | None = None, pending: bool = False):
                    delta_arrow="off" if pending else "auto")
 
 
-k1, k2, k3, k4, k5 = st.columns(5)
-k1_slot = k1.empty()
-if prev_month and is_cached(force, prev_month):
-    searches_metric(len(apply_filters(get_stops(force, prev_month))))
+if data.empty:
+    prev_month = None  # nothing to compare
 else:
-    searches_metric(pending=bool(prev_month))
-k2.metric("Arrest rate", fmt_pct(rate(data["outcome"].eq("Arrest"))), border=True,
-          help="Share of searches with an outcome of arrest.")
-k3.metric("No further action", fmt_pct(rate(data["outcome"].eq("A no further action disposal"))), border=True,
-          help="Share of searches where no further action was taken.")
-linked = linked_rate(data)
-k4.metric("Linked outcome", "n/a" if linked is None else fmt_pct(linked), border=True,
-          help="Share of searches where the outcome was linked to what the officer was searching for (e.g. a "
-               "drugs search that found drugs). Shown as n/a when this force doesn't reliably record it.")
-k5.metric("With a location", fmt_pct(rate(located)), border=True,
-          help="Some records are published without a location and can't be placed on the map.")
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1_slot = k1.empty()
+    if prev_month and is_cached(force, prev_month):
+        searches_metric(len(apply_filters(get_stops(force, prev_month))))
+    else:
+        searches_metric(pending=bool(prev_month))
+    k2.metric("Arrest rate", fmt_pct(rate(data["outcome"].eq("Arrest"))), border=True,
+              help="Share of searches with an outcome of arrest.")
+    k3.metric("No further action", fmt_pct(rate(data["outcome"].eq("A no further action disposal"))), border=True,
+              help="Share of searches where no further action was taken.")
+    linked = linked_rate(data)
+    k4.metric("Linked outcome", "n/a" if linked is None else fmt_pct(linked), border=True,
+              help="Share of searches where the outcome was linked to what the officer was searching for (e.g. a "
+                   "drugs search that found drugs). Shown as n/a when this force doesn't reliably record it.")
+    k5.metric("With a location", fmt_pct(rate(located)), border=True,
+              help="Some records are published without a location and can't be placed on the map.")
 
 # --------------------------------------------------------------------------------------
 # Tabs (only the open tab runs, and the open tab is kept in the URL)
@@ -414,8 +452,25 @@ tab_map, tab_people, tab_reasons, tab_time, tab_trend, tab_data = st.tabs(
     key="view", on_change="rerun", bind="query-params",
 )
 
+
+def tab_ready(tab) -> bool:
+    """True if the tab is open and there's data to draw; otherwise show a short message in the tab."""
+    if not tab.open:
+        return False
+    if data.empty:
+        with tab:
+            if has_data:
+                st.caption("No records match the selected filters.")
+            elif force_months_all:
+                st.caption("No data available yet for this force and month.")
+            else:
+                st.caption("This force doesn't publish stop and search data to the Police Data API.")
+        return False
+    return True
+
+
 with tab_map:
-    if tab_map.open:
+    if tab_ready(tab_map):
         pts = data.dropna(subset=["lat", "lon"]).copy()
         if pts.empty:
             st.info("None of these records include a location, so there's nothing to map.")
@@ -465,7 +520,7 @@ with tab_map:
             )
 
 with tab_people:
-    if tab_people.open:
+    if tab_ready(tab_people):
         c1, c2 = st.columns(2)
         with c1:
             chart(ranked_bars(data, "age_range", "Age range", order=AGE_ORDER))
@@ -485,7 +540,7 @@ with tab_people:
                             "What people were searched for, by age range", y_order=AGE_ORDER), legend_rows=4)
 
 with tab_reasons:
-    if tab_reasons.open:
+    if tab_ready(tab_reasons):
         c1, c2 = st.columns(2)
         with c1:
             chart(ranked_bars(data, "object_of_search", "Object of search"))
@@ -499,7 +554,7 @@ with tab_reasons:
             chart(ranked_bars(data, "type", "Search type"))
 
 with tab_time:
-    if tab_time.open:
+    if tab_ready(tab_time):
         timed = data.dropna(subset=["datetime"]).copy()
         timed["day"] = pd.Categorical(timed["datetime"].dt.strftime("%a"), DAY_ORDER)
         timed["hour"] = timed["datetime"].dt.hour
@@ -542,7 +597,8 @@ with tab_trend:
                                "first time it's loaded, so longer ranges take longer for large forces.")
         else:
             n = len(force_months)
-            st.caption(f"Only {n} month(s) of data are available up to {month_label(month)}.")
+            if n:
+                st.caption(f"Only {n} month(s) of data are available up to {month_label(month)}.")
         wanted = list(reversed(force_months[:n]))
         to_fetch = [m for m in wanted if not is_cached(force, m)]
         failed = []
@@ -578,7 +634,8 @@ with tab_trend:
             st.warning("Couldn't load: " + ", ".join(month_label(m) for m in failed))
         trend = pd.concat([f for f in frames if not f.empty], ignore_index=True) if frames else pd.DataFrame()
         if trend.empty:
-            st.info("No records in this range.")
+            st.caption("No data available for this force up to this month." if not force_months
+                       else "No records match the selected filters in this range.")
         else:
             trend["month_start"] = pd.to_datetime(trend["month"])
             month_axis = alt.X("label:O", title=None, sort=None, axis=alt.Axis(labelAngle=0))
@@ -652,7 +709,7 @@ with tab_trend:
                 )
 
 with tab_data:
-    if tab_data.open:
+    if tab_ready(tab_data):
         st.dataframe(
             data,
             hide_index=True,

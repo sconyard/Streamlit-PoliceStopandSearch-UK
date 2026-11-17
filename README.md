@@ -36,7 +36,9 @@ URL, so you can share a link to a specific view.
 
 - `forces` gives the list of forces and their names.
 - `crimes-street-dates` lists which months are available, and which forces published stop and search data for
-  each month. Only valid combinations are offered, so you don't hit "no data" errors.
+  each month. Every force stays in the list. If a force hasn't published data for the chosen month (forces upload
+  monthly and some run a few months behind), the app says so, offers a button to jump to the nearest month with
+  data, and still shows the force's earlier months on the Trend tab.
 - `stops-force?force=<id>&date=<YYYY-MM>` returns the records, which are flattened into a pandas DataFrame.
 
 API responses are cached for 24 hours, so moving between views and filters doesn't re-query the API. Most forces
