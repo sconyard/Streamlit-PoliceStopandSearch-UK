@@ -49,6 +49,7 @@ MAP_HEAT_COLOURS = (
     else [[134, 182, 239, 90], [90, 150, 225, 150], [52, 118, 205, 190], [32, 92, 175, 215], [24, 72, 140, 235],
           [16, 48, 100, 250]]
 )
+MAP_POINT_COLOUR = [int(SERIES_1[i:i + 2], 16) for i in (1, 3, 5)] + [190]  # the series blue, slightly see-through
 
 # Fixed category orders so a category keeps the same colour whatever force/month is shown.
 AGE_ORDER = ["under 10", "10-17", "18-24", "25-34", "over 34", NOT_RECORDED]
@@ -555,13 +556,14 @@ with tab_map:
                     "HexagonLayer", data=pts[["lat", "lon"]], get_position="[lon, lat]",
                     radius=max(150, int(400 / 2 ** (zoom - 9))), elevation_scale=6, elevation_range=[0, 1500],
                     extruded=True, pickable=True, coverage=0.9,
+                    color_range=[c[:3] + [235] for c in MAP_HEAT_COLOURS],  # same blues as the heatmap
                 )
                 tooltip = {"text": "{elevationValue} searches in this area"}
                 pitch = 40
             else:
                 layer = pdk.Layer(
                     "ScatterplotLayer", data=pts[tooltip_cols], get_position="[lon, lat]",
-                    get_fill_color=[214, 64, 52, 170], get_radius=60, radius_min_pixels=3, radius_max_pixels=12,
+                    get_fill_color=MAP_POINT_COLOUR, get_radius=60, radius_min_pixels=3, radius_max_pixels=12,
                     pickable=True,
                 )
                 tooltip = {"html": "<b>{street}</b><br/>{when}<br/>{type} · {object_of_search}<br/>Outcome: {outcome}"}
