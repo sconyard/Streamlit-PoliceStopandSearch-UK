@@ -16,13 +16,14 @@ published for that month and shows:
 
 - **Headline figures:** total searches (with the change on the previous month), arrest rate, no further action
   rate, linked-outcome rate, and how many records include a location.
-- **Map:** 3D hexagon density or individual points, centred on the force area. Hover for details.
+- **Map:** a density heatmap, 3D hexagons or individual points, centred on the force area. Hover hexagons and
+  points for details.
 - **Who was searched:** age range, gender and ethnicity (officer-defined or self-defined), plus what people were
-  searched for by age range.
-- **Reasons & outcomes:** object of search, outcome, outcome by object of search, legislation and search type.
-- **When:** a day-of-week × hour-of-day heatmap and searches per day.
-- **Trend:** up to 36 months for the force: searches per month, arrest and linked-outcome rates, and searches by
-  object of search.
+  searched for by age range (as a heatmap).
+- **Reasons & outcomes:** object of search, outcome, outcome by object of search (as a heatmap), legislation and search type.
+- **When:** a day-of-week × hour-of-day heatmap and a line of searches per day.
+- **Trend:** up to 36 months for the force: searches per month, arrest and linked-outcome rates, and a heatmap of
+  the object-of-search mix month by month.
 - **Data:** the full table, downloadable as CSV, with a link to the underlying API query.
 
 Filters for search type and object of search apply to every view. The month, force and open tab are kept in the

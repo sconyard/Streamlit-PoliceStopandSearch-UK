@@ -38,8 +38,17 @@ PALETTE = (
     else ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"]
 )
 SERIES_1 = PALETTE[0]
-OTHER_GREY = "#898781"
 HEAT_RANGE = ["#1c5cab", "#86b6ef"] if IS_DARK else ["#cde2fb", "#184f95"]
+# Ink for numbers printed on heatmap cells: [on low cells, on high cells]
+HEAT_INK = ["#ffffff", "#0e1117"] if IS_DARK else ["#262730", "#ffffff"]
+# Map heatmap: one blue hue, faint at low density and strongest where searches cluster
+MAP_HEAT_COLOURS = (
+    [[28, 92, 171, 90], [45, 115, 205, 150], [70, 140, 230, 190], [110, 170, 240, 215], [160, 200, 248, 235],
+     [215, 232, 253, 250]]
+    if IS_DARK
+    else [[134, 182, 239, 90], [90, 150, 225, 150], [52, 118, 205, 190], [32, 92, 175, 215], [24, 72, 140, 235],
+          [16, 48, 100, 250]]
+)
 
 # Fixed category orders so a category keeps the same colour whatever force/month is shown.
 AGE_ORDER = ["under 10", "10-17", "18-24", "25-34", "over 34", NOT_RECORDED]
@@ -211,41 +220,88 @@ def ranked_bars(df: pd.DataFrame, field: str, title: str, order: list[str] | Non
     )
 
 
-def stacked_share(df: pd.DataFrame, y_field: str, color_field: str, colour_keep: list[str], title: str,
-                  y_order: list[str] | None = None, normalise: bool = True):
-    """Horizontal stacked bars: each row is a y category, split by colour category."""
-    data = df[[y_field, color_field]].copy()
-    data[color_field] = fold_categories(data[color_field], colour_keep)
-    counts = data.value_counts().reset_index(name="searches")
-    counts["share"] = counts["searches"] / counts.groupby(y_field)["searches"].transform("sum")
-    domain = [c for c in colour_keep if c in set(counts[color_field])]
-    colours = [PALETTE[colour_keep.index(c)] for c in domain]
-    if "Other" in set(counts[color_field]):
-        domain.append("Other")
-        colours.append(OTHER_GREY)
-    counts["order"] = counts[color_field].map({c: i for i, c in enumerate(domain)})
-    rows = y_order if y_order else counts.groupby(y_field)["searches"].sum().sort_values(ascending=False).index.tolist()
-    return (
-        alt.Chart(counts, title=title)
-        .mark_bar(stroke=None)
-        .encode(
-            x=alt.X("searches:Q", stack="normalize" if normalise else "zero",
-                    title="Share of searches" if normalise else "Searches",
-                    axis=alt.Axis(format="%") if normalise else alt.Axis()),
-            y=alt.Y(f"{y_field}:N", sort=[r for r in rows if r in set(counts[y_field])], title=None,
-                    axis=alt.Axis(labelLimit=260), scale=alt.Scale(paddingInner=0.3)),
-            color=alt.Color(f"{color_field}:N", scale=alt.Scale(domain=domain, range=colours),
-                            legend=alt.Legend(title=None, orient="bottom", columns=2, labelLimit=320)),
-            order=alt.Order("order:Q"),
-            tooltip=[
-                alt.Tooltip(f"{y_field}:N", title=y_field.replace("_", " ").capitalize()),
-                alt.Tooltip(f"{color_field}:N", title=color_field.replace("_", " ").capitalize()),
-                alt.Tooltip("searches:Q", title="Searches", format=","),
-                alt.Tooltip("share:Q", title="Share of row", format=".1%"),
-            ],
-        )
-        .properties(height=max(160, 36 * len(rows)))
+SHORT_OUTCOME = {
+    "A no further action disposal": "No further action",
+    "Khat or Cannabis warning": "Khat/cannabis warning",
+    "Summons / charged by post": "Summons",
+    "Penalty Notice for Disorder": "Penalty notice",
+    "Caution (simple or conditional)": "Caution",
+}
+
+
+def _category_order(values: pd.Series, counts: pd.Series, order: list[str] | None) -> list[str]:
+    """The categories present, in the given order (then 'Other'), or biggest first."""
+    present = set(values)
+    if order:
+        return [c for c in order if c in present] + (["Other"] if "Other" in present else [])
+    return counts.groupby(values).sum().sort_values(ascending=False).index.tolist()
+
+
+def share_matrix(df: pd.DataFrame, row_field: str, col_field: str, title: str, *, share_of: str = "col",
+                 row_keep: list[str] | None = None, col_keep: list[str] | None = None,
+                 row_order: list[str] | None = None, col_order: list[str] | None = None,
+                 col_labels: dict[str, str] | None = None, col_sort_by_value: bool = False,
+                 col_tips: dict[str, str] | None = None, show_values: bool = True,
+                 col_name: str | None = None, share_title: str = "Share"):
+    """Heatmap of two categories against each other. Each cell's shade is its share of its column (or row),
+    so the mix can be compared across columns without one big category drowning out the rest."""
+    data = df[[row_field, col_field]].copy()
+    if row_keep:
+        data[row_field] = fold_categories(data[row_field], row_keep)
+    if col_keep:
+        data[col_field] = fold_categories(data[col_field], col_keep)
+    # Full grid, so empty combinations show as empty cells rather than gaps
+    grid = pd.crosstab(data[row_field], data[col_field]).stack().rename("searches").reset_index()
+    group = col_field if share_of == "col" else row_field
+    totals = grid.groupby(group)["searches"].transform("sum")
+    grid["share"] = (grid["searches"] / totals).fillna(0.0)
+    rows = _category_order(grid[row_field], grid["searches"], row_order)
+    cols = (sorted(grid[col_field].unique()) if col_sort_by_value
+            else _category_order(grid[col_field], grid["searches"], col_order))
+    grid["col_label"] = grid[col_field].map(lambda c: (col_labels or {}).get(c, c))
+    grid["col_tip"] = grid[col_field].map(lambda c: (col_tips or {}).get(c, c))
+    col_label_order = [(col_labels or {}).get(c, c) for c in cols]
+    top = max(float(grid["share"].max()), 0.01)
+    grid["label"] = grid["share"].map(lambda s: "" if s < 0.005 else f"{s:.0%}")
+    grid["strong"] = grid["share"] > top * 0.55
+
+    base = alt.Chart(grid, title=title).encode(
+        x=alt.X("col_label:N", sort=col_label_order, title=None,
+                axis=alt.Axis(orient="top", labelAngle=0 if len(cols) <= 12 else -45, labelLimit=120,
+                              labelOverlap=False, ticks=False, domain=False),
+                scale=alt.Scale(paddingInner=0.06)),
+        y=alt.Y(f"{row_field}:N", sort=rows, title=None,
+                axis=alt.Axis(labelLimit=260, ticks=False, domain=False), scale=alt.Scale(paddingInner=0.06)),
     )
+    cells = base.mark_rect(cornerRadius=2).encode(
+        color=alt.Color("share:Q", scale=alt.Scale(domain=[0, top], range=HEAT_RANGE),
+                        legend=alt.Legend(title=share_title, format="%", orient="bottom", gradientLength=220)),
+        tooltip=[
+            alt.Tooltip(f"{row_field}:N", title=row_field.replace("_", " ").capitalize()),
+            alt.Tooltip("col_tip:N", title=col_name or col_field.replace("_", " ").capitalize()),
+            alt.Tooltip("searches:Q", title="Searches", format=","),
+            alt.Tooltip("share:Q", title=share_title, format=".1%"),
+        ],
+    )
+    layers = cells
+    if show_values:
+        text = base.mark_text(fontSize=12).encode(
+            text="label:N",
+            color=alt.condition("datum.strong", alt.value(HEAT_INK[1]), alt.value(HEAT_INK[0])),
+            tooltip=alt.value(None),
+        )
+        layers = cells + text
+    return layers.properties(height=max(160, 34 * len(rows)))
+
+
+def trend_line(df: pd.DataFrame, x: alt.X, title: str, tooltip: list, height: int = 260):
+    """A single-series count over time: a line with a light fill beneath and a marker per period."""
+    base = alt.Chart(df, title=title).encode(x=x, y=alt.Y("searches:Q", title="Searches"))
+    return (
+        base.mark_area(color=SERIES_1, opacity=0.12)
+        + base.mark_line(color=SERIES_1, strokeWidth=2)
+        + base.mark_point(color=SERIES_1, filled=True, size=60, opacity=1).encode(tooltip=tooltip)
+    ).properties(height=height)
 
 
 def rate(mask: pd.Series) -> float | None:
@@ -475,8 +531,9 @@ with tab_map:
         if pts.empty:
             st.info("None of these records include a location, so there's nothing to map.")
         else:
-            style = st.segmented_control("Map style", ["Hexagons", "Points"], default="Hexagons", required=True,
-                                         label_visibility="collapsed")
+            style = st.segmented_control("Map style", ["Heatmap", "Hexagons", "Points"], default="Heatmap",
+                                         required=True, label_visibility="collapsed", key="map_style",
+                                         bind="query-params")
             # Centre and zoom on the bulk of the data (ignoring stray outliers)
             lat_lo, lat_hi = pts["lat"].quantile([0.05, 0.95])
             lon_lo, lon_hi = pts["lon"].quantile([0.05, 0.95])
@@ -485,7 +542,15 @@ with tab_map:
             pts["when"] = pts["datetime"].dt.strftime("%a %d %b %H:%M")
             pts = pts.fillna({"street": "Location withheld"})
             tooltip_cols = ["lat", "lon", "street", "when", "type", "object_of_search", "outcome"]
-            if style == "Hexagons":
+            if style == "Heatmap":
+                layer = pdk.Layer(
+                    "HeatmapLayer", data=pts[["lat", "lon"]], get_position="[lon, lat]", get_weight=1,
+                    aggregation="SUM", radius_pixels=40, intensity=1, threshold=0.05,
+                    color_range=MAP_HEAT_COLOURS,
+                )
+                tooltip = False  # a density surface has no individual records to describe
+                pitch = 0
+            elif style == "Hexagons":
                 layer = pdk.Layer(
                     "HexagonLayer", data=pts[["lat", "lon"]], get_position="[lon, lat]",
                     radius=max(150, int(400 / 2 ** (zoom - 9))), elevation_scale=6, elevation_range=[0, 1500],
@@ -515,7 +580,9 @@ with tab_map:
             )
             missing = total - len(pts)
             st.caption(
-                "Locations are approximate: the API snaps each one to a nearby anonymised point."
+                ("Darker areas had more searches; switch to Hexagons for counts or Points for individual records. "
+                 if style == "Heatmap" else "")
+                + "Locations are approximate: the API snaps each one to a nearby anonymised point."
                 + (f" {missing:,} record(s) had no location and aren't shown." if missing else "")
             )
 
@@ -536,8 +603,10 @@ with tab_people:
             "Counts only: comparing groups fairly needs local population figures (e.g. the Census), "
             "which aren't part of this data."
         )
-        chart(stacked_share(data, "age_range", "object_of_search", OBJECT_ORDER,
-                            "What people were searched for, by age range", y_order=AGE_ORDER), legend_rows=4)
+        chart(share_matrix(data, "object_of_search", "age_range", "What people were searched for, by age range",
+                           share_of="col", row_keep=OBJECT_ORDER, row_order=OBJECT_ORDER, col_order=AGE_ORDER,
+                           col_name="Age range", share_title="Share of age range"), legend_rows=2)
+        st.caption("Each column adds up to 100%: the mix of reasons for searching people in that age range.")
 
 with tab_reasons:
     if tab_ready(tab_reasons):
@@ -546,7 +615,11 @@ with tab_reasons:
             chart(ranked_bars(data, "object_of_search", "Object of search"))
         with c2:
             chart(ranked_bars(data, "outcome", "Outcome"))
-        chart(stacked_share(data, "object_of_search", "outcome", OUTCOME_ORDER, "Outcome by object of search"), legend_rows=4)
+        chart(share_matrix(data, "object_of_search", "outcome", "Outcome by object of search", share_of="row",
+                           col_keep=OUTCOME_ORDER, col_order=OUTCOME_ORDER, col_labels=SHORT_OUTCOME,
+                           share_title="Share of object's searches"),
+              legend_rows=2)
+        st.caption("Each row adds up to 100%: what happened after searches for that object.")
         c3, c4 = st.columns(2)
         with c3:
             chart(ranked_bars(data, "legislation", "Legislation used"))
@@ -576,17 +649,9 @@ with tab_time:
         chart(heat)
         daily = timed.groupby(timed["datetime"].dt.date).size().rename_axis("date").reset_index(name="searches")
         daily["date"] = pd.to_datetime(daily["date"])
-        chart(
-            alt.Chart(daily, title="Searches per day")
-            .mark_bar(color=SERIES_1, cornerRadiusEnd=3)
-            .encode(
-                x=alt.X("date:T", title=None, axis=alt.Axis(format="%d %b")),
-                y=alt.Y("searches:Q", title="Searches"),
-                tooltip=[alt.Tooltip("date:T", title="Date", format="%a %d %b %Y"),
-                         alt.Tooltip("searches:Q", title="Searches")],
-            )
-            .properties(height=240)
-        )
+        chart(trend_line(daily, alt.X("date:T", title=None, axis=alt.Axis(format="%d %b")), "Searches per day",
+                         [alt.Tooltip("date:T", title="Date", format="%a %d %b %Y"),
+                          alt.Tooltip("searches:Q", title="Searches")], height=240))
 
 with tab_trend:
     if tab_trend.open:
@@ -647,17 +712,9 @@ with tab_trend:
                 ]
             )
             monthly["label"] = monthly["month_start"].dt.strftime("%b %y")
-            chart(
-                alt.Chart(monthly, title="Searches per month")
-                .mark_bar(color=SERIES_1, cornerRadiusEnd=4)
-                .encode(
-                    x=month_axis,
-                    y=alt.Y("searches:Q", title="Searches"),
-                    tooltip=[alt.Tooltip("label:O", title="Month"),
-                             alt.Tooltip("searches:Q", title="Searches", format=",")],
-                )
-                .properties(height=260)
-            )
+            chart(trend_line(monthly, month_axis, "Searches per month",
+                             [alt.Tooltip("label:O", title="Month"),
+                              alt.Tooltip("searches:Q", title="Searches", format=",")]))
             rates = monthly.melt(["month_start", "label"], ["arrest", "linked"], var_name="measure", value_name="rate").dropna()
             rates["measure"] = rates["measure"].map({"arrest": "Arrest rate", "linked": "Linked outcome"})
             base = alt.Chart(rates, title="Arrest rate and linked-outcome rate").encode(
@@ -670,31 +727,18 @@ with tab_trend:
                          alt.Tooltip("measure:N", title="Measure"), alt.Tooltip("rate:Q", title="Rate", format=".1%")],
             )
             chart((base.mark_line(strokeWidth=2) + base.mark_point(size=60, filled=True)).properties(height=260), legend_rows=1)
-            trend["object_of_search"] = fold_categories(trend["object_of_search"], OBJECT_ORDER)
-            obj = trend.groupby(["month_start", "object_of_search"]).size().reset_index(name="searches")
-            obj["label"] = obj["month_start"].dt.strftime("%b %y")
-            domain = [c for c in OBJECT_ORDER if c in set(obj["object_of_search"])]
-            colours = [PALETTE[OBJECT_ORDER.index(c)] for c in domain]
-            if "Other" in set(obj["object_of_search"]):
-                domain.append("Other")
-                colours.append(OTHER_GREY)
-            obj["order"] = obj["object_of_search"].map({c: i for i, c in enumerate(domain)})
+            # Month labels sort chronologically as "YYYY-MM", then are shown as "Jan 26"
+            obj_src = trend.assign(month_key=trend["month"])
             chart(
-                alt.Chart(obj, title="Searches per month by object of search")
-                .mark_bar()
-                .encode(
-                    x=month_axis,
-                    y=alt.Y("searches:Q", title="Searches"),
-                    color=alt.Color("object_of_search:N", scale=alt.Scale(domain=domain, range=colours),
-                                    legend=alt.Legend(title=None, orient="bottom", columns=2, labelLimit=320)),
-                    order=alt.Order("order:Q"),
-                    tooltip=[alt.Tooltip("label:O", title="Month"),
-                             alt.Tooltip("object_of_search:N", title="Object of search"),
-                             alt.Tooltip("searches:Q", title="Searches", format=",")],
-                )
-                .properties(height=320),
-                legend_rows=4,
+                share_matrix(obj_src, "object_of_search", "month_key", "Object of search by month",
+                             share_of="col", row_keep=OBJECT_ORDER, row_order=OBJECT_ORDER, col_sort_by_value=True,
+                             col_labels={m: month_label(m)[:3] + " " + m[2:4] for m in wanted},
+                             col_tips={m: month_label(m) for m in wanted}, col_name="Month",
+                             show_values=len(wanted) <= 12, share_title="Share of month"),
+                legend_rows=2,
             )
+            st.caption("Each column adds up to 100%: the mix of reasons for searching in that month. "
+                       "Hover a cell for the number of searches.")
             with st.expander("Monthly figures as a table"):
                 st.dataframe(
                     monthly.assign(month=monthly["month_start"].dt.strftime("%B %Y"))[
