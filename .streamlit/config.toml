@@ -1,0 +1,5 @@
+[server]
+# Streamlit's event-based (watchdog) file watcher fails to start on Streamlit Cloud with
+# "'_MultiPathWatcher' object has no attribute '_observer'". Polling avoids it and still
+# picks up changes when a new commit is pulled.
+fileWatcherType = "poll"
