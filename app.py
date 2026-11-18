@@ -404,13 +404,16 @@ with st.sidebar:
             "Object of search", sorted(stops["object_of_search"].unique()), placeholder="All objects of search"
         )
 
+    st.markdown(
+        ":material/open_in_new: [Looking for crime and outcome data?](https://policereporting-uk.streamlit.app/)"
+    )
+
     st.divider()
     st.markdown(
-        "Data comes directly from the [Police Data API](https://data.police.uk/docs/method/stops-force/) and is as "
-        "current as each force's uploads. The API keeps roughly the last three years.\n\n"
+        "Contains public sector information licensed under the Open Government Licence v3.0. "
+        "Provided as is, with no warranty.\n\n"
         "Created by [Simon Conyard](https://www.linkedin.com/in/simonconyard/)"
     )
-    st.caption("Contains public sector information licensed under the Open Government Licence v3.0.")
 
 
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
