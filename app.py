@@ -404,16 +404,15 @@ with st.sidebar:
             "Object of search", sorted(stops["object_of_search"].unique()), placeholder="All objects of search"
         )
 
-    st.markdown(
-        ":material/open_in_new: [Looking for crime and outcome data?](https://policereporting-uk.streamlit.app/)"
-    )
-
     st.divider()
-    st.markdown(
-        "Contains public sector information licensed under the Open Government Licence v3.0. "
-        "Provided as is, with no warranty.\n\n"
-        "Created by [Simon Conyard](https://www.linkedin.com/in/simonconyard/)"
+    st.page_link("https://policereporting-uk.streamlit.app/", label="Looking for crime and outcome data?",
+                 icon=":material/gavel:")
+    st.caption(
+        "Contains public sector information licensed under the "
+        "[Open Government Licence v3.0](https://www.nationalarchives.gov.uk/doc/"
+        "open-government-licence/version/3/). Provided as is, with no warranty."
     )
+    st.caption("Created by [Simon Conyard](https://www.linkedin.com/in/simonconyard/)")
 
 
 def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
